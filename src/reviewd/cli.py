@@ -251,16 +251,37 @@ def pr(ctx, repo: str, pr_id: int, verbose: bool, dry_run: bool, force: bool, cl
 
 
 @main.command(name='ls')
+@click.argument('repo', metavar='[repo_name_or_path]', required=False)
 @click.option('-v', '--verbose', is_flag=True, help='Enable verbose logging')
 @click.pass_context
-def ls_repos(ctx, verbose: bool):
-    """List watched repos and their open PRs."""
+def ls_repos(ctx, repo: str | None, verbose: bool):
+    """List watched repos and their open PRs. If a repo/path is provided, lists only that one."""
     _resolve_verbose(ctx, verbose)
     _ensure_global_config(ctx.obj['config_path'])
     config = load_global_config(ctx.obj['config_path'])
     state_db = StateDB(config.state_db)
+
+    # Determine which repos to list
+    target_repos = config.repos
+    if repo is None:
+        # Default to '.' if it's a valid repo, otherwise list all configured repos
+        cwd_repo_name = _resolve_repo(config, '.')
+        cwd_repo = next((r for r in config.repos if r.name == cwd_repo_name), None)
+        if cwd_repo:
+            target_repos = [cwd_repo]
+    else:
+        # Explicit repo passed
+        repo_name = _resolve_repo(config, repo)
+        explicit_repo = next((r for r in config.repos if r.name == repo_name), None)
+        if explicit_repo:
+            target_repos = [explicit_repo]
+        else:
+            available = ', '.join(r.name for r in config.repos) or '(none)'
+            click.echo(f'Repo "{repo_name}" not found. Available: {available}', err=True)
+            raise SystemExit(1)
+
     try:
-        for repo_config in config.repos:
+        for repo_config in target_repos:
             provider_name = repo_config.provider or 'bitbucket'
             click.echo(f'\n{repo_config.name}  ({provider_name}, {repo_config.cli.value})')
             try:
@@ -277,10 +298,14 @@ def ls_repos(ctx, verbose: bool):
                 click.echo(f'  Error: {e}')
     finally:
         state_db.close()
+    
     click.echo()
-    click.echo('To review a PR:  reviewd pr <repo> <id>')
-    click.echo("To review a PR using current dir:  reviewd pr . <id>")
-    click.echo('To review a PR (dry run):  reviewd pr <repo> <id> --dry-run')
+    if len(target_repos) == 1:
+        repo_name = target_repos[0].name
+        click.echo(f'To review a PR:  reviewd pr {repo_name} <id>')
+    else:
+        click.echo('To review a PR:  reviewd pr <repo> <id>')
+        click.echo("To review a PR using current dir:  reviewd pr . <id>")
 
 
 @main.command()
