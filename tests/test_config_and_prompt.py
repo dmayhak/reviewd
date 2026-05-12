@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from reviewd.config import _merge_auto_approve, load_global_config, load_project_config
-from reviewd.models import AutoApproveConfig, GlobalConfig, ProjectConfig
+from reviewd.models import AutoApproveConfig, GlobalConfig, ProjectConfig, RepoConfig
 from reviewd.prompt import build_review_prompt
 
 # ---------------------------------------------------------------------------
@@ -13,7 +15,7 @@ from reviewd.prompt import build_review_prompt
 # ---------------------------------------------------------------------------
 
 
-def test_load_global_config_valid(tmp_path):
+def test_load_global_config_valid(tmp_path: Path):
     cfg = tmp_path / 'config.yaml'
     cfg.write_text(
         """
@@ -36,21 +38,21 @@ repos:
     assert config.bitbucket['myteam'] == 'fake-token-123'
 
 
-def test_load_global_config_malformed_yaml(tmp_path):
+def test_load_global_config_malformed_yaml(tmp_path: Path):
     cfg = tmp_path / 'bad.yaml'
     cfg.write_text('  bad:\n yaml: [')
     with pytest.raises(SystemExit, match='Invalid YAML'):
         load_global_config(cfg)
 
 
-def test_load_global_config_not_a_dict(tmp_path):
+def test_load_global_config_not_a_dict(tmp_path: Path):
     cfg = tmp_path / 'list.yaml'
     cfg.write_text('- item1\n- item2')
     with pytest.raises(SystemExit, match='expected a YAML mapping'):
         load_global_config(cfg)
 
 
-def test_load_global_config_missing_repo_field(tmp_path):
+def test_load_global_config_missing_repo_field(tmp_path: Path):
     cfg = tmp_path / 'config.yaml'
     cfg.write_text(
         """
@@ -63,7 +65,7 @@ repos:
         load_global_config(cfg)
 
 
-def test_load_project_config_merges_instructions(tmp_path):
+def test_load_project_config_merges_instructions(tmp_path: Path):
     project_yaml = tmp_path / '.reviewd.yaml'
     project_yaml.write_text(
         """
@@ -98,6 +100,81 @@ def test_auto_approve_legacy_compat():
     merged = _merge_auto_approve(None, None, legacy_approve_if_no_critical=True)
     assert merged.enabled is True
     assert merged.max_severity == 'suggestion'
+
+
+def test_load_global_config_with_project_override(tmp_path: Path):
+    # Global config with a basic repo path
+    global_cfg_path = tmp_path / 'global.yaml'
+    global_cfg_path.write_text(
+        """
+cli: claude
+model: sonnet-3.5
+repos:
+  - path: /tmp/my-repo
+"""
+    )
+
+    # Project config with detailed overrides
+    project_repo_path = Path('/tmp/my-repo')
+    project_repo_path.mkdir(exist_ok=True)
+    project_cfg_path = project_repo_path / '.reviewd.yaml'
+    project_cfg_path.write_text(
+        """
+repo:
+  name: overridden-name
+  provider: github
+  repo_slug: org/overridden-repo
+  cli: gemini
+  model: flash-1.5
+"""
+    )
+
+    config = load_global_config(global_cfg_path)
+    assert len(config.repos) == 1
+    repo = config.repos[0]
+    assert repo.name == 'overridden-name'
+    assert repo.path == str(project_repo_path)
+    assert repo.provider == 'github'
+    assert repo.repo_slug == 'org/overridden-repo'
+    assert repo.cli == 'gemini'
+    assert repo.model == 'flash-1.5'
+
+
+def test_load_repo_from_project_file_if_not_in_global(tmp_path: Path, monkeypatch):
+    # Global config with NO repos
+    global_cfg_path = tmp_path / 'global.yaml'
+    global_cfg_path.write_text(
+        """
+cli: claude
+model: sonnet-3.5
+"""
+    )
+
+    # Project in current directory with full repo definition
+    project_dir = tmp_path / 'project'
+    project_dir.mkdir()
+    project_cfg_path = project_dir / '.reviewd.yaml'
+    project_cfg_path.write_text(
+        """
+repo:
+  name: project-repo
+  provider: bitbucket
+  workspace: my-workspace
+"""
+    )
+
+    # Run from inside the project directory
+    monkeypatch.chdir(project_dir)
+
+    config = load_global_config(global_cfg_path)
+    assert len(config.repos) == 1
+    repo = config.repos[0]
+    assert repo.name == 'project-repo'
+    assert repo.path == str(project_dir)
+    assert repo.provider == 'bitbucket'
+    assert repo.workspace == 'my-workspace'
+    assert repo.cli == 'claude'  # Inherited
+    assert repo.model == 'sonnet-3.5'  # Inherited
 
 
 # ---------------------------------------------------------------------------

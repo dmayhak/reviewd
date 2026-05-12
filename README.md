@@ -31,6 +31,7 @@ https://github.com/user-attachments/assets/e99705d6-5595-478e-b5de-f47d3abcfa37
 - **Critical tasks** — optionally creates a BitBucket PR task on critical findings to block merge.
 - **Spam protection** — configurable diff size thresholds, cooldowns, and title/author skip patterns.
 - **Auto-sync config** — automatically pulls `.reviewd.yaml` from remote when the working copy is clean.
+- **Dynamic Configs** — optionally skip explicitly configuring repos in your global config, dynamically inheriting them from the `.` folder or just supplying `path:` arrays and configuring settings on a per-project basis.
 
 ## Quick Start
 
@@ -130,6 +131,7 @@ Both providers can be used in the same config. Tokens support `${ENV_VAR}` subst
 
 ```bash
 reviewd pr my-project 42           # one-shot review
+reviewd pr . 42                    # one-shot review dynamically using cwd path
 reviewd pr my-project 42 --dry-run # preview without posting
 reviewd watch -v                   # continuous review loop
 ```
@@ -185,6 +187,8 @@ repos:
     workspace: your-workspace
     cli: gemini                   # or "codex"
     model: gemini-2.5-pro
+
+  - path: ~/repos/minimal-repo    # Loads repo config settings from ~/repos/minimal-repo/.reviewd.yaml!
 ```
 
 ### Per-project (`.reviewd.yaml` in repo root)
@@ -205,6 +209,14 @@ inline_comments_for: [critical]  # rest goes in summary
 # min_diff_lines_update: 5       # re-review threshold for pushed commits
 # review_cooldown_minutes: 30
 # critical_task: true            # create PR task on critical findings (BitBucket)
+
+# Override or define this repo settings (overrides global ~/.config/reviewd/config.yaml)
+# repo:
+#   name: my-project
+#   provider: github
+#   repo_slug: org/project
+#   cli: claude
+#   model: claude-sonnet-3-5
 ```
 
 ### Auto-Approve
@@ -249,6 +261,7 @@ reviewd watch -v --dry-run                    # preview, no posting
 reviewd watch -v --review-existing            # review not-yet-reviewed open PRs
 reviewd watch --concurrency 8                 # override max concurrent reviews
 reviewd pr <repo> <id>                        # one-shot review (reviews drafts too)
+reviewd pr . <id>                             # one-shot review matching current path dynamically
 reviewd pr <repo> <id> --force                # re-review (bypasses already-reviewed/cooldown/skip)
 reviewd status <repo>                         # review history
 ```

@@ -99,17 +99,18 @@ def _resolve_verbose(ctx, local_verbose: bool) -> bool:
 @click.group(invoke_without_command=True)
 @click.option('--config', 'config_path', default=None, help='Path to global config file')
 @click.option('-v', '--verbose', is_flag=True, help='Enable verbose logging')
+@click.version_option(version=VERSION, message=f'reviewd v{VERSION}')
 @click.pass_context
 def main(ctx, config_path: str | None, verbose: bool):
     ctx.ensure_object(dict)
     ctx.obj['config_path'] = config_path
     ctx.obj['verbose'] = verbose
     _setup_logging(verbose)
-    click.echo(f'reviewd v{VERSION}')
 
     if ctx.invoked_subcommand is None:
         path = Path(config_path).expanduser() if config_path else CONFIG_PATH
         if not path.exists():
+            click.echo(f'reviewd v{VERSION}')
             ctx.invoke(init)
         else:
             click.echo(ctx.get_help())
@@ -210,8 +211,28 @@ def watch(ctx, verbose: bool, dry_run: bool, review_existing: bool, cli: str | N
     run_poll_loop(config, dry_run=dry_run, review_existing=review_existing, verbose=verbose)
 
 
+def _resolve_repo(config: GlobalConfig, repo_arg: str) -> str:
+    # Treat '.' as the path to the current working directory
+    if repo_arg == '.':
+        repo_arg = str(Path.cwd())
+
+    # Check if the argument is a valid directory path
+    path = Path(repo_arg).expanduser().resolve()
+    if path.is_dir():
+        # See if there's a configured repo that matches this path exactly
+        for r in config.repos:
+            if Path(r.path).expanduser().resolve() == path:
+                return r.name
+        
+        # If it wasn't matched but is a directory, just return its folder name
+        # It's possible we dynamically discovered it, so its name would match its folder name.
+        return path.name
+
+    return repo_arg
+
+
 @main.command()
-@click.argument('repo')
+@click.argument('repo', metavar='<repo_name_or_path>')
 @click.argument('pr_id', type=int)
 @click.option('-v', '--verbose', is_flag=True, help='Enable verbose logging')
 @click.option('--dry-run', is_flag=True, help='Print review without posting')
@@ -219,12 +240,14 @@ def watch(ctx, verbose: bool, dry_run: bool, review_existing: bool, cli: str | N
 @click.option('--cli', type=click.Choice(['claude', 'gemini', 'codex']), default=None, help='Override AI CLI')
 @click.pass_context
 def pr(ctx, repo: str, pr_id: int, verbose: bool, dry_run: bool, force: bool, cli: str | None):
-    """One-shot review of a specific PR."""
+    """One-shot review of a specific PR. You can provide a repo name, a local path, or '.' to match the current directory's repo."""
     _resolve_verbose(ctx, verbose)
     _ensure_global_config(ctx.obj['config_path'])
     config = load_global_config(ctx.obj['config_path'])
     _apply_cli_override(config, cli)
-    review_single_pr(config, repo, pr_id=pr_id, dry_run=dry_run, force=force)
+    
+    repo_name = _resolve_repo(config, repo)
+    review_single_pr(config, repo_name, pr_id=pr_id, dry_run=dry_run, force=force)
 
 
 @main.command(name='ls')
@@ -256,24 +279,27 @@ def ls_repos(ctx, verbose: bool):
         state_db.close()
     click.echo()
     click.echo('To review a PR:  reviewd pr <repo> <id>')
+    click.echo("To review a PR using current dir:  reviewd pr . <id>")
     click.echo('To review a PR (dry run):  reviewd pr <repo> <id> --dry-run')
 
 
 @main.command()
-@click.argument('repo')
+@click.argument('repo', metavar='<repo_name_or_path>')
 @click.option('-v', '--verbose', is_flag=True, help='Enable verbose logging')
 @click.option('--limit', default=20, help='Number of recent reviews to show')
 @click.pass_context
 def status(ctx, repo: str, verbose: bool, limit: int):
-    """Show review history for a repo."""
+    """Show review history for a repo. You can provide a repo name, a local path, or '.' to match the current directory."""
     _resolve_verbose(ctx, verbose)
     _ensure_global_config(ctx.obj['config_path'])
     config = load_global_config(ctx.obj['config_path'])
     state_db = StateDB(config.state_db)
     try:
-        history = state_db.get_review_history(repo, limit=limit)
+        repo_name = _resolve_repo(config, repo)
+
+        history = state_db.get_review_history(repo_name, limit=limit)
         if not history:
-            click.echo(f'No review history for {repo}')
+            click.echo(f'No review history for {repo_name}')
             return
         for row in history:
             status_str = row['status']

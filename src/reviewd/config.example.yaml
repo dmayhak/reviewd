@@ -137,6 +137,14 @@
 # test_commands:                 # commands to run in worktree during review
 #   - uv run ruff check .
 #   - uv run pytest tests/ -x -q
+#
+# Override or define this repo settings (overrides global ~/.config/reviewd/config.yaml)
+# repo:
+#   name: my-project
+#   provider: github
+#   repo_slug: org/project
+#   cli: claude
+#   model: claude-sonnet-3-5
 
 # --- Repos ---
 
@@ -152,6 +160,8 @@ repos: []
   #   workspace: my-workspace          # must match a key in bitbucket section
   #   # cli: gemini              # override per repo
   #   # model: gemini-2.5-pro    # override per repo
+  #
+  # - path: ~/repos/minimal-repo # Loads repo config settings from ~/repos/minimal-repo/.reviewd.yaml
 
 # --- State ---
 

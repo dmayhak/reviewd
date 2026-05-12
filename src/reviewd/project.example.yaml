@@ -4,6 +4,15 @@
 # Project-specific instructions and settings.
 # These are merged with global config (global instructions come first).
 
+# Repo definition (dynamically merges and overrides settings in global config)
+# repo:
+#   name: my-project
+#   provider: github              # github or bitbucket
+#   repo_slug: org/project        # required if name != slug on provider
+#   workspace: my-workspace       # required for Bitbucket
+#   cli: claude                   # override AI CLI for this project
+#   model: claude-sonnet-3-5      # override specific model
+
 # Review instructions specific to this project
 # instructions: |
 #   Python 3.12+, Django 5.x.

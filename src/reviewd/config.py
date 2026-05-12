@@ -127,6 +127,52 @@ def _merge_auto_approve(
     )
 
 
+CONFIG_NAME = '.reviewd.yaml'
+
+
+def load_repo_config_from_path(repo_path: Path, global_cli: CLI, global_model: str | None) -> RepoConfig | None:
+    project_config_file = repo_path / CONFIG_NAME
+    if not project_config_file.exists():
+        return None
+
+    try:
+        with open(project_config_file) as pf:
+            project_data = yaml.safe_load(pf) or {}
+    except Exception:
+        return None
+
+    project_repo_data = project_data.get('repo')
+    if not project_repo_data and 'repos' in project_data:
+        if isinstance(project_data['repos'], list) and len(project_data['repos']) > 0:
+            project_repo_data = project_data['repos'][0]
+        elif isinstance(project_data['repos'], dict):
+            project_repo_data = project_data['repos']
+
+    if not project_repo_data or not isinstance(project_repo_data, dict):
+        return None
+
+    repo_data = {'path': str(repo_path), 'name': repo_path.name, **project_repo_data}
+    if 'provider' not in repo_data:
+        return None
+
+    repo_gh = None
+    if 'github' in repo_data:
+        repo_gh = _parse_github_config(repo_data['github'])
+
+    repo_cli = _parse_cli(repo_data['cli'], repo_data['name']) if 'cli' in repo_data else global_cli
+
+    return RepoConfig(
+        name=repo_data['name'],
+        path=str(repo_path),
+        provider=repo_data['provider'],
+        repo_slug=repo_data.get('repo_slug'),
+        workspace=repo_data.get('workspace'),
+        github=repo_gh,
+        cli=repo_cli,
+        model=repo_data.get('model', global_model),
+    )
+
+
 def load_global_config(path: str | Path | None = None) -> GlobalConfig:
     if path is None:
         config_home = os.environ.get('XDG_CONFIG_HOME', '~/.config')
@@ -150,12 +196,40 @@ def load_global_config(path: str | Path | None = None) -> GlobalConfig:
         global_gh = _parse_github_config(data['github'])
 
     global_cli = _parse_cli(data.get('cli', 'claude'))
+    global_model = data.get('model')
 
     repos = []
-    for i, repo_data in enumerate(data.get('repos', [])):
-        for field in ('name', 'path', 'provider'):
-            if field not in repo_data:
-                raise SystemExit(f'Repo #{i + 1} in {path} is missing required field "{field}"')
+    for i, base_repo_data in enumerate(data.get('repos', [])):
+        if 'path' not in base_repo_data:
+            raise SystemExit(f'Repo #{i + 1} in {path} is missing required field "path"')
+
+        repo_path = Path(base_repo_data['path']).expanduser()
+
+        # Load per-project overrides if any
+        project_config_file = repo_path / CONFIG_NAME
+        project_data = {}
+        if project_config_file.exists():
+            try:
+                with open(project_config_file) as pf:
+                    project_data = yaml.safe_load(pf) or {}
+            except yaml.YAMLError as e:
+                raise SystemExit(f'Invalid YAML in {project_config_file}: {e}') from e
+
+        project_repo_data = project_data.get('repo')
+        if not project_repo_data and 'repos' in project_data:
+            if isinstance(project_data['repos'], list) and len(project_data['repos']) > 0:
+                project_repo_data = project_data['repos'][0]
+            elif isinstance(project_data['repos'], dict):
+                project_repo_data = project_data['repos']
+
+        repo_data = {**base_repo_data}
+        if project_repo_data and isinstance(project_repo_data, dict):
+            repo_data.update(project_repo_data)
+
+        if 'name' not in repo_data:
+            repo_data['name'] = repo_path.name
+        if 'provider' not in repo_data:
+            raise SystemExit(f'Repo in {repo_path} is missing required field "provider"')
 
         repo_gh = None
         if 'github' in repo_data:
@@ -165,15 +239,22 @@ def load_global_config(path: str | Path | None = None) -> GlobalConfig:
         repos.append(
             RepoConfig(
                 name=repo_data['name'],
-                path=str(Path(repo_data['path']).expanduser()),
+                path=str(repo_path),
                 provider=repo_data['provider'],
                 repo_slug=repo_data.get('repo_slug'),
                 workspace=repo_data.get('workspace'),
                 github=repo_gh,
                 cli=repo_cli,
-                model=repo_data.get('model', data.get('model')),
+                model=repo_data.get('model', global_model),
             )
         )
+
+    # Discover repo in current directory if .reviewd.yaml has repo definition
+    cwd = Path.cwd()
+    if not any(Path(r.path).resolve() == cwd.resolve() for r in repos):
+        cwd_repo = load_repo_config_from_path(cwd, global_cli, global_model)
+        if cwd_repo:
+            repos.append(cwd_repo)
 
     default_data_home = os.environ.get('XDG_DATA_HOME', '~/.local/share')
     state_db = data.get('state_db', f'{default_data_home}/reviewd/state.db')
@@ -191,7 +272,7 @@ def load_global_config(path: str | Path | None = None) -> GlobalConfig:
         github=global_gh,
         state_db=state_db,
         cli=global_cli,
-        model=data.get('model'),
+        model=global_model,
         cli_args=data.get('cli_args', []),
         cli_defaults={CLI(k): v for k, v in data.get('cli_defaults', {}).items()},
         instructions=data.get('instructions'),
@@ -208,8 +289,6 @@ def load_global_config(path: str | Path | None = None) -> GlobalConfig:
 
 
 _config_logger = logging.getLogger(__name__)
-
-CONFIG_NAME = '.reviewd.yaml'
 
 
 _GIT_ENV = {**os.environ, 'GIT_TERMINAL_PROMPT': '0'}
