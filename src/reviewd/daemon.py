@@ -160,6 +160,7 @@ def _process_pr(
     dry_run: bool = False,
     force: bool = False,
     ignore_draft: bool = False,
+    interactive_prompt: bool = False,
 ):
     if _shutdown_event.is_set():
         return
@@ -172,15 +173,29 @@ def _process_pr(
         return
 
     if not force and state_db.has_review(pr.repo_slug, pr.pr_id, pr.source_commit):
-        logger.debug('PR #%d@%s already reviewed, skipping', pr.pr_id, pr.source_commit[:8])
-        return
+        if interactive_prompt:
+            click.echo(f'{YELLOW}PR #{pr.pr_id} @ {pr.source_commit[:8]} has already been reviewed.{RESET}')
+            if click.confirm('Do you want to re-review it?', default=False):
+                force = True
+            else:
+                return
+        else:
+            logger.debug('PR #%d@%s already reviewed, skipping', pr.pr_id, pr.source_commit[:8])
+            return
 
     if not force and project_config.review_cooldown_minutes > 0:
         minutes = state_db.minutes_since_last_review(pr.repo_slug, pr.pr_id)
         if minutes is not None and minutes < project_config.review_cooldown_minutes:
             remaining = int(project_config.review_cooldown_minutes - minutes)
-            logger.info('PR #%d in cooldown (%dmin remaining), skipping', pr.pr_id, remaining)
-            return
+            if interactive_prompt:
+                click.echo(f'{YELLOW}PR #{pr.pr_id} is in cooldown ({remaining}min remaining).{RESET}')
+                if click.confirm('Do you want to force re-review it anyway?', default=False):
+                    force = True
+                else:
+                    return
+            else:
+                logger.info('PR #%d in cooldown (%dmin remaining), skipping', pr.pr_id, remaining)
+                return
 
     diff_lines = None
     if not force:
@@ -190,8 +205,15 @@ def _process_pr(
         if needs_diff:
             diff_lines = get_diff_lines(repo_config.path, pr)
             if threshold > 0 and 0 <= diff_lines < threshold:
-                logger.info('PR #%d diff too small (%d lines < %d), skipping', pr.pr_id, diff_lines, threshold)
-                return
+                if interactive_prompt:
+                    click.echo(f'{YELLOW}PR #{pr.pr_id} diff is very small ({diff_lines} lines).{RESET}')
+                    if click.confirm('Do you want to review it anyway?', default=False):
+                        force = True
+                    else:
+                        return
+                else:
+                    logger.info('PR #%d diff too small (%d lines < %d), skipping', pr.pr_id, diff_lines, threshold)
+                    return
 
     logger.log(
         22,
@@ -486,6 +508,7 @@ def review_single_pr(
     pr_id: int,
     dry_run: bool = False,
     force: bool = False,
+    interactive_prompt: bool = False,
 ):
     def _handle_shutdown(_signum, _frame):
         logger.info('Shutting down')
@@ -516,6 +539,7 @@ def review_single_pr(
             dry_run=dry_run,
             force=force,
             ignore_draft=True,
+            interactive_prompt=interactive_prompt,
         )
     finally:
         state_db.close()

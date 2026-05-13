@@ -4,6 +4,7 @@ import importlib.metadata
 import logging
 import logging.handlers
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -231,6 +232,18 @@ def _resolve_repo(config: GlobalConfig, repo_arg: str) -> str:
     return repo_arg
 
 
+def review_pr_cmd(ctx, repo: str, pr_id: int, verbose: bool, dry_run: bool, force: bool, cli: str | None, interactive_prompt: bool = False):
+    # Retrieve 'verbose' from the context dict instead of assigning it as an attribute
+    verbose_val = ctx.obj.get('verbose', False) or verbose
+    _resolve_verbose(ctx, verbose_val)
+    _ensure_global_config(ctx.obj['config_path'])
+    config = load_global_config(ctx.obj['config_path'])
+    _apply_cli_override(config, cli)
+    
+    repo_name = _resolve_repo(config, repo)
+    review_single_pr(config, repo_name, pr_id=pr_id, dry_run=dry_run, force=force, interactive_prompt=interactive_prompt)
+
+
 @main.command()
 @click.argument('repo', metavar='<repo_name_or_path>')
 @click.argument('pr_id', type=int)
@@ -241,21 +254,62 @@ def _resolve_repo(config: GlobalConfig, repo_arg: str) -> str:
 @click.pass_context
 def pr(ctx, repo: str, pr_id: int, verbose: bool, dry_run: bool, force: bool, cli: str | None):
     """One-shot review of a specific PR. You can provide a repo name, a local path, or '.' to match the current directory's repo."""
-    _resolve_verbose(ctx, verbose)
-    _ensure_global_config(ctx.obj['config_path'])
-    config = load_global_config(ctx.obj['config_path'])
-    _apply_cli_override(config, cli)
-    
-    repo_name = _resolve_repo(config, repo)
-    review_single_pr(config, repo_name, pr_id=pr_id, dry_run=dry_run, force=force)
+    review_pr_cmd(ctx, repo, pr_id, verbose, dry_run, force, cli, interactive_prompt=True)
+
+
+def _interactive_select(options: list[tuple[str, str]]) -> str | None:
+    """Interactively select an option using fzf if available, else a numbered list."""
+    if not options:
+        return None
+
+    import shutil
+    has_fzf = shutil.which('fzf') is not None
+
+    if has_fzf:
+        input_text = '\n'.join(display for display, _ in options)
+        try:
+            result = subprocess.run(
+                ['fzf', '--prompt=Select a PR to review> '],
+                input=input_text,
+                text=True,
+                capture_output=True,
+            )
+            if result.returncode == 0:
+                selected_display = result.stdout.strip()
+                for display, value in options:
+                    if display == selected_display:
+                        return value
+        except Exception:
+            pass
+        return None
+
+    # Fallback: simple text prompt
+    for i, (display, _) in enumerate(options, 1):
+        click.echo(f'{i}) {display}')
+
+    while True:
+        try:
+            choice = input('\nEnter number to select a PR (or empty to cancel): ').strip()
+            if not choice:
+                return None
+            idx = int(choice) - 1
+            if 0 <= idx < len(options):
+                return options[idx][1]
+            click.echo('Invalid selection.')
+        except ValueError:
+            click.echo('Please enter a valid number.')
+        except (KeyboardInterrupt, EOFError):
+            return None
 
 
 @main.command(name='ls')
 @click.argument('repo', metavar='[repo_name_or_path]', required=False)
 @click.option('-v', '--verbose', is_flag=True, help='Enable verbose logging')
+@click.option('--dry-run', is_flag=True, help='If a PR is selected, preview the review without posting')
+@click.option('--force', is_flag=True, help='If a PR is selected, review even if already reviewed (bypasses cooldown/skip)')
 @click.pass_context
-def ls_repos(ctx, repo: str | None, verbose: bool):
-    """List watched repos and their open PRs. If a repo/path is provided, lists only that one."""
+def ls_repos(ctx, repo: str | None, verbose: bool, dry_run: bool, force: bool):
+    """List watched repos and their open PRs. Select one to review."""
     _resolve_verbose(ctx, verbose)
     _ensure_global_config(ctx.obj['config_path'])
     config = load_global_config(ctx.obj['config_path'])
@@ -280,32 +334,48 @@ def ls_repos(ctx, repo: str | None, verbose: bool):
             click.echo(f'Repo "{repo_name}" not found. Available: {available}', err=True)
             raise SystemExit(1)
 
+    pr_options: list[tuple[str, str]] = []
+
     try:
         for repo_config in target_repos:
-            provider_name = repo_config.provider or 'bitbucket'
-            click.echo(f'\n{repo_config.name}  ({provider_name}, {repo_config.cli.value})')
             try:
                 provider = get_provider(config, repo_config)
                 prs = provider.list_open_prs(repo_config.slug)
                 if not prs:
-                    click.echo('  No open PRs')
                     continue
                 for pr in prs:
                     reviewed = state_db.has_review(pr.repo_slug, pr.pr_id, pr.source_commit)
                     marker = '\u2713' if reviewed else '\u2022'
-                    click.echo(f'  {marker} #{pr.pr_id}  {pr.title}  ({pr.author})')
+
+                    # Create formatted string for display
+                    display = f'[{repo_config.name}] #{pr.pr_id} {pr.title} ({pr.author}) {marker}'
+                    # The value contains the actual repo name and PR ID separated by a space
+                    value = f'{repo_config.name} {pr.pr_id}'
+                    pr_options.append((display, value))
             except Exception as e:
-                click.echo(f'  Error: {e}')
+                click.echo(f'  Error loading {repo_config.name}: {e}', err=True)
     finally:
         state_db.close()
     
-    click.echo()
-    if len(target_repos) == 1:
-        repo_name = target_repos[0].name
-        click.echo(f'To review a PR:  reviewd pr {repo_name} <id>')
-    else:
-        click.echo('To review a PR:  reviewd pr <repo> <id>')
-        click.echo("To review a PR using current dir:  reviewd pr . <id>")
+    if not pr_options:
+        click.echo('No open PRs found.')
+        return
+
+    # Prompt user to interactively select a PR
+    selected_value = _interactive_select(pr_options)
+    if not selected_value:
+        return
+
+    # Parse selection and invoke 'pr' command
+    sel_repo, sel_pr_id_str = selected_value.split(' ', 1)
+    sel_pr_id = int(sel_pr_id_str)
+
+    dry_run_flag = " --dry-run" if dry_run else ""
+    force_flag = " --force" if force else ""
+    click.echo(f'\n{CYAN}Running: reviewd pr {sel_repo} {sel_pr_id}{dry_run_flag}{force_flag}{RESET}\n')
+
+    # Invoke directly instead of via click's context to avoid context argument binding issues
+    review_pr_cmd(ctx, repo=sel_repo, pr_id=sel_pr_id, verbose=verbose, dry_run=dry_run, force=force, cli=None, interactive_prompt=True)
 
 
 @main.command()

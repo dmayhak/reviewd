@@ -24,6 +24,7 @@ https://github.com/user-attachments/assets/e99705d6-5595-478e-b5de-f47d3abcfa37
 - **Runs real commands** — configure linters, type checkers, and test suites to run during review. Failures are included in the AI's analysis.
 - **Structured output** — severity-tagged findings with inline comments on specific lines and a summary comment.
 - **Batch mode or one-shot** — review a single PR on demand, or run a continuous local review loop across all your repos in an open terminal.
+- **Interactive selection** — use `reviewd ls` to view open PRs and interactively pick one to review using `fzf`.
 - **Multi-repo, multi-AI** — different repos can use different AI backends, models, and review instructions.
 - **Smart re-reviews** — new commits on a PR trigger a fresh review; old comments are cleaned up automatically.
 - **Draft-aware** — in batch mode, drafts are skipped unless the title contains `[review]`, `[claudiu]`, `[ask]`, or `[bot review]`. The `pr` command always reviews regardless of draft status.
@@ -130,6 +131,7 @@ Both providers can be used in the same config. Tokens support `${ENV_VAR}` subst
 ### 3. Review
 
 ```bash
+reviewd ls                         # interactively view and select an open PR to review
 reviewd pr my-project 42           # one-shot review
 reviewd pr . 42                    # one-shot review dynamically using cwd path
 reviewd pr my-project 42 --dry-run # preview without posting
@@ -255,7 +257,7 @@ All gates must pass — if any one blocks, the PR is not approved. The `rules` f
 ```bash
 reviewd init                                  # interactive setup wizard
 reviewd init --sample                         # write sample config (skip wizard)
-reviewd ls                                    # list repos and open PRs
+reviewd ls                                    # list repos, interactively select an open PR to review
 reviewd watch -v                              # continuous review loop (verbose)
 reviewd watch -v --dry-run                    # preview, no posting
 reviewd watch -v --review-existing            # review not-yet-reviewed open PRs
