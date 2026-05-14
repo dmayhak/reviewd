@@ -158,6 +158,7 @@ def _process_pr(
     global_config: GlobalConfig,
     state_db: StateDB,
     dry_run: bool = False,
+    post: bool = False,
     force: bool = False,
     ignore_draft: bool = False,
     interactive_prompt: bool = False,
@@ -224,7 +225,8 @@ def _process_pr(
         pr.title,
     )
     provider = get_provider(global_config, repo_config)
-    state_db.start_review(pr.repo_slug, pr.pr_id, pr.source_commit)
+    if not dry_run:
+        state_db.start_review(pr.repo_slug, pr.pr_id, pr.source_commit)
     review_key = (pr.repo_slug, pr.pr_id)
 
     with _active_reviews_lock:
@@ -241,7 +243,8 @@ def _process_pr(
             cli_defaults=global_config.cli_defaults,
         )
         if _shutdown_event.is_set():
-            state_db.finish_review(pr.repo_slug, pr.pr_id, pr.source_commit, error='shutdown')
+            if not dry_run:
+                state_db.finish_review(pr.repo_slug, pr.pr_id, pr.source_commit, error='shutdown')
             return
         post_review(
             provider,
@@ -251,14 +254,17 @@ def _process_pr(
             project_config,
             global_config,
             cli=repo_config.cli,
-            model=repo_config.model or global_config.model,
+            model=repo_config.model,
             dry_run=dry_run,
+            post=post,
             diff_lines=diff_lines,
         )
-        state_db.finish_review(pr.repo_slug, pr.pr_id, pr.source_commit)
+        if not dry_run:
+            state_db.finish_review(pr.repo_slug, pr.pr_id, pr.source_commit)
         logger.log(25, 'Finished review of PR #%d (%d findings)', pr.pr_id, len(result.findings))
     except Exception as e:
-        state_db.finish_review(pr.repo_slug, pr.pr_id, pr.source_commit, error=str(e))
+        if not dry_run:
+            state_db.finish_review(pr.repo_slug, pr.pr_id, pr.source_commit, error=str(e))
         logger.exception('Failed to review PR #%d', pr.pr_id)
     finally:
         with _active_reviews_lock:
@@ -354,6 +360,7 @@ def _boot_summary(global_config: GlobalConfig, state_db: StateDB, review_existin
 def run_poll_loop(
     global_config: GlobalConfig,
     dry_run: bool = False,
+    post: bool = False,
     review_existing: bool = False,
     verbose: bool = False,
 ):
@@ -372,7 +379,7 @@ def run_poll_loop(
 
     _boot_summary(global_config, state_db, review_existing)
 
-    logger.info('Polling every %ds, max %d concurrent reviews (dry_run=%s)', poll_interval, max_workers, dry_run)
+    logger.info('Polling every %ds, max %d concurrent reviews (dry_run=%s, post=%s)', poll_interval, max_workers, dry_run, post)
 
     # Save terminal settings so we can restore after subprocesses corrupt them
     _saved_termios = None
@@ -468,6 +475,7 @@ def run_poll_loop(
                     glob_cfg,
                     state_db,
                     dry_run=dry_run,
+                    post=post,
                 )
                 futures[future] = pr
                 in_flight.add((pr.repo_slug, pr.pr_id))
@@ -507,6 +515,7 @@ def review_single_pr(
     repo_name: str,
     pr_id: int,
     dry_run: bool = False,
+    post: bool = False,
     force: bool = False,
     interactive_prompt: bool = False,
 ):
@@ -537,6 +546,7 @@ def review_single_pr(
             global_config,
             state_db,
             dry_run=dry_run,
+            post=post,
             force=force,
             ignore_draft=True,
             interactive_prompt=interactive_prompt,

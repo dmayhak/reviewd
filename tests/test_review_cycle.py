@@ -19,7 +19,7 @@ def test_full_review_posts_inline_and_summary(provider, state_db, pr, global_con
     assert len(result.findings) == 2
     assert result.findings[1].severity == Severity.CRITICAL
 
-    post_review(provider, state_db, pr, result, project_config, global_config)
+    post_review(provider, state_db, pr, result, project_config, global_config, post=True)
 
     # 1 inline (critical) + 1 summary
     assert len(provider.posted_comments) == 2
@@ -44,12 +44,12 @@ def test_re_review_deletes_old_comments_first(provider, state_db, pr, global_con
     result = make_result([make_finding()])
 
     # First review
-    post_review(provider, state_db, pr, result, project_config, global_config)
+    post_review(provider, state_db, pr, result, project_config, global_config, post=True)
     first_ids = state_db.get_comment_ids(pr.repo_slug, pr.pr_id)
     assert len(first_ids) == 1
 
     # Second review
-    post_review(provider, state_db, pr, result, project_config, global_config)
+    post_review(provider, state_db, pr, result, project_config, global_config, post=True)
 
     assert provider.deleted_comments == first_ids
     new_ids = state_db.get_comment_ids(pr.repo_slug, pr.pr_id)
@@ -63,7 +63,7 @@ def test_duplicate_findings_deduplicated(provider, state_db, pr, global_config, 
     f2 = make_finding(title='Same issue', file='a.py', line=1)
     result = make_result([f1, f2])
 
-    post_review(provider, state_db, pr, result, project_config, global_config)
+    post_review(provider, state_db, pr, result, project_config, global_config, post=True)
 
     summary = provider.posted_comments[0]['body']
     assert summary.count('Same issue') == 1
@@ -79,7 +79,7 @@ def test_skip_severities_filtered(provider, state_db, pr, global_config):
         ]
     )
 
-    post_review(provider, state_db, pr, result, project_config, global_config)
+    post_review(provider, state_db, pr, result, project_config, global_config, post=True)
 
     summary = provider.posted_comments[0]['body']
     assert 'Real bug' in summary

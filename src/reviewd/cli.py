@@ -194,12 +194,13 @@ def init(ctx, sample: bool, verbose: bool):
 
 @main.command()
 @click.option('-v', '--verbose', is_flag=True, help='Enable verbose logging')
-@click.option('--dry-run', is_flag=True, help='Print reviews without posting')
+@click.option('--dry-run', is_flag=True, help='Print reviews without posting and without marking as reviewed')
+@click.option('--post', is_flag=True, help='Automatically post reviews without prompting')
 @click.option('--review-existing', is_flag=True, help='Review unreviewed open PRs on startup')
 @click.option('--cli', type=click.Choice(['claude', 'gemini', 'codex']), default=None, help='Override AI CLI')
 @click.option('--concurrency', type=int, default=None, help='Max concurrent reviews (default: 4)')
 @click.pass_context
-def watch(ctx, verbose: bool, dry_run: bool, review_existing: bool, cli: str | None, concurrency: int | None):
+def watch(ctx, verbose: bool, dry_run: bool, post: bool, review_existing: bool, cli: str | None, concurrency: int | None):
     """Start the daemon — polls for new PRs and reviews them."""
     verbose = _resolve_verbose(ctx, verbose)
     _check_for_updates()
@@ -209,7 +210,7 @@ def watch(ctx, verbose: bool, dry_run: bool, review_existing: bool, cli: str | N
     _apply_cli_override(config, cli)
     if concurrency is not None:
         config.max_concurrent_reviews = concurrency
-    run_poll_loop(config, dry_run=dry_run, review_existing=review_existing, verbose=verbose)
+    run_poll_loop(config, dry_run=dry_run, post=post, review_existing=review_existing, verbose=verbose)
 
 
 def _resolve_repo(config: GlobalConfig, repo_arg: str) -> str:
@@ -232,7 +233,7 @@ def _resolve_repo(config: GlobalConfig, repo_arg: str) -> str:
     return repo_arg
 
 
-def review_pr_cmd(ctx, repo: str, pr_id: int, verbose: bool, dry_run: bool, force: bool, cli: str | None, interactive_prompt: bool = False):
+def review_pr_cmd(ctx, repo: str, pr_id: int, verbose: bool, dry_run: bool, post: bool, force: bool, cli: str | None, interactive_prompt: bool = False):
     # Retrieve 'verbose' from the context dict instead of assigning it as an attribute
     verbose_val = ctx.obj.get('verbose', False) or verbose
     _resolve_verbose(ctx, verbose_val)
@@ -241,20 +242,21 @@ def review_pr_cmd(ctx, repo: str, pr_id: int, verbose: bool, dry_run: bool, forc
     _apply_cli_override(config, cli)
     
     repo_name = _resolve_repo(config, repo)
-    review_single_pr(config, repo_name, pr_id=pr_id, dry_run=dry_run, force=force, interactive_prompt=interactive_prompt)
+    review_single_pr(config, repo_name, pr_id=pr_id, dry_run=dry_run, post=post, force=force, interactive_prompt=interactive_prompt)
 
 
 @main.command()
 @click.argument('repo', metavar='<repo_name_or_path>')
 @click.argument('pr_id', type=int)
 @click.option('-v', '--verbose', is_flag=True, help='Enable verbose logging')
-@click.option('--dry-run', is_flag=True, help='Print review without posting')
+@click.option('--dry-run', is_flag=True, help='Print review without posting and without marking as reviewed')
+@click.option('--post', is_flag=True, help='Automatically post review without prompting')
 @click.option('--force', is_flag=True, help='Review even if already reviewed (bypasses cooldown/skip)')
 @click.option('--cli', type=click.Choice(['claude', 'gemini', 'codex']), default=None, help='Override AI CLI')
 @click.pass_context
-def pr(ctx, repo: str, pr_id: int, verbose: bool, dry_run: bool, force: bool, cli: str | None):
+def pr(ctx, repo: str, pr_id: int, verbose: bool, dry_run: bool, post: bool, force: bool, cli: str | None):
     """One-shot review of a specific PR. You can provide a repo name, a local path, or '.' to match the current directory's repo."""
-    review_pr_cmd(ctx, repo, pr_id, verbose, dry_run, force, cli, interactive_prompt=True)
+    review_pr_cmd(ctx, repo, pr_id, verbose, dry_run, post, force, cli, interactive_prompt=True)
 
 
 def _interactive_select(options: list[tuple[str, str]]) -> str | None:
@@ -313,16 +315,18 @@ def _interactive_select(options: list[tuple[str, str]]) -> str | None:
 @main.command(name='ls')
 @click.argument('repo', metavar='[repo_name_or_path]', required=False)
 @click.option('-v', '--verbose', is_flag=True, help='Enable verbose logging')
-@click.option('--dry-run', is_flag=True, help='If a PR is selected, preview the review without posting')
+@click.option('--dry-run', is_flag=True, help='If a PR is selected, preview without posting and without marking as reviewed')
+@click.option('--post', is_flag=True, help='If a PR is selected, automatically post review without prompting')
 @click.option('--force', is_flag=True, help='If a PR is selected, review even if already reviewed (bypasses cooldown/skip)')
 @click.pass_context
-def ls_repos(ctx, repo: str | None, verbose: bool, dry_run: bool, force: bool):
+def ls_repos(ctx, repo: str | None, verbose: bool, dry_run: bool, post: bool, force: bool):
     """List watched repos and their open PRs. Select one to review."""
     _resolve_verbose(ctx, verbose)
     _ensure_global_config(ctx.obj['config_path'])
     config = load_global_config(ctx.obj['config_path'])
     state_db = StateDB(config.state_db)
 
+    # ... (rest of ls_repos) ...
     # Determine which repos to list
     target_repos = config.repos
     if repo is None:
@@ -393,11 +397,12 @@ def ls_repos(ctx, repo: str | None, verbose: bool, dry_run: bool, force: bool):
     sel_pr_id = int(sel_pr_id_str)
 
     dry_run_flag = " --dry-run" if dry_run else ""
+    post_flag = " --post" if post else ""
     force_flag = " --force" if force else ""
-    click.echo(f'\n{CYAN}Running: reviewd pr {sel_repo} {sel_pr_id}{dry_run_flag}{force_flag}{RESET}\n')
+    click.echo(f'\n{CYAN}Running: reviewd pr {sel_repo} {sel_pr_id}{dry_run_flag}{post_flag}{force_flag}{RESET}\n')
 
     # Invoke directly instead of via click's context to avoid context argument binding issues
-    review_pr_cmd(ctx, repo=sel_repo, pr_id=sel_pr_id, verbose=verbose, dry_run=dry_run, force=force, cli=None, interactive_prompt=True)
+    review_pr_cmd(ctx, repo=sel_repo, pr_id=sel_pr_id, verbose=verbose, dry_run=dry_run, post=post, force=force, cli=None, interactive_prompt=True)
 
 
 @main.command()

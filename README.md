@@ -258,11 +258,14 @@ All gates must pass — if any one blocks, the PR is not approved. The `rules` f
 reviewd init                                  # interactive setup wizard
 reviewd init --sample                         # write sample config (skip wizard)
 reviewd ls                                    # list repos, interactively select an open PR to review
-reviewd watch -v                              # continuous review loop (verbose)
-reviewd watch -v --dry-run                    # preview, no posting
+reviewd watch -v                              # loop, preview and prompt for each (default)
+reviewd watch -v --post                       # loop, auto-review and auto-post
+reviewd watch -v --dry-run                    # loop, preview only, no state change
 reviewd watch -v --review-existing            # review not-yet-reviewed open PRs
 reviewd watch --concurrency 8                 # override max concurrent reviews
-reviewd pr <repo> <id>                        # one-shot review (reviews drafts too)
+reviewd pr <repo> <id>                        # review, preview and prompt (default)
+reviewd pr <repo> <id> --post                 # review and post automatically
+reviewd pr <repo> <id> --dry-run              # review, preview only, no state change
 reviewd pr . <id>                             # one-shot review matching current path dynamically
 reviewd pr <repo> <id> --force                # re-review (bypasses already-reviewed/cooldown/skip)
 reviewd status <repo>                         # review history

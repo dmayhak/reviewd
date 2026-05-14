@@ -302,6 +302,7 @@ def post_review(
     cli: CLI = CLI.CLAUDE,
     model: str | None = None,
     dry_run: bool = False,
+    post: bool = False,
     diff_lines: int | None = None,
 ):
     # Deduplicate findings by file + line + title
@@ -345,7 +346,8 @@ def post_review(
     inline_ids = {id(f) for f in inline_findings}
 
     if dry_run:
-        should_post = _print_dry_run(
+        # True dry-run: print only, no DB log, no prompt
+        _print_dry_run(
             result,
             inline_findings,
             inline_ids,
@@ -354,23 +356,58 @@ def post_review(
             cli,
             model=model,
             diff_lines=diff_lines,
+            skip_confirm=True,
         )
-        if not should_post:
-            return
+        return
 
-    _post_review_impl(
-        provider,
-        state_db,
-        pr,
+    if post:
+        # Auto-post and log to DB
+        _post_review_impl(
+            provider,
+            state_db,
+            pr,
+            result,
+            project_config,
+            global_config,
+            inline_findings,
+            inline_ids,
+            cli,
+            model=model,
+            diff_lines=diff_lines,
+        )
+        return
+
+    # Default: Preview + Prompt. Log to DB either way.
+    should_post = _print_dry_run(
         result,
-        project_config,
-        global_config,
         inline_findings,
         inline_ids,
+        global_config,
+        project_config,
         cli,
         model=model,
         diff_lines=diff_lines,
+        skip_confirm=False,
     )
+    
+    if should_post:
+        _post_review_impl(
+            provider,
+            state_db,
+            pr,
+            result,
+            project_config,
+            global_config,
+            inline_findings,
+            inline_ids,
+            cli,
+            model=model,
+            diff_lines=diff_lines,
+        )
+    else:
+        # Mark as reviewed even if we didn't post the comment
+        state_db.start_review(pr.repo_slug, pr.pr_id, pr.source_commit)
+        state_db.finish_review(pr.repo_slug, pr.pr_id, pr.source_commit)
 
 
 def _print_dry_run(
@@ -382,9 +419,10 @@ def _print_dry_run(
     cli: CLI = CLI.CLAUDE,
     model: str | None = None,
     diff_lines: int | None = None,
+    skip_confirm: bool = False,
 ) -> bool:
     print('\n' + '=' * 60)
-    print('DRY RUN — would post the following comments:')
+    print('REVIEW PREVIEW — the following would be posted:' if not skip_confirm else 'DRY RUN — results:')
     print('=' * 60)
 
     if inline_findings:
@@ -415,7 +453,7 @@ def _print_dry_run(
         )
     )
 
-    print('\n==================== DRY RUN SUMMARY ====================')
+    print('\n==================== REVIEW SUMMARY ====================')
     if aa.enabled:
         if approved:
             print(f'✅ Auto-Approve: WOULD APPROVE PR')
@@ -430,8 +468,11 @@ def _print_dry_run(
         else:
             print(f'  (The AI did not recommend approval)')
             
-    print(f'💬 Comments: Would post {len(inline_findings)} inline + 1 summary comment.')
+    print(f'💬 Comments: {len(inline_findings)} inline + 1 summary comment.')
     print('=========================================================\n')
+
+    if skip_confirm:
+        return False
 
     import click
     from reviewd.colors import YELLOW, RESET
@@ -442,4 +483,7 @@ def _print_dry_run(
         
     prompt += f'{RESET}'
     
-    return click.confirm(prompt, default=False)
+    try:
+        return click.confirm(prompt, default=False)
+    except (click.Abort, EOFError, KeyboardInterrupt):
+        return False

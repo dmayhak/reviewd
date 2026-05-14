@@ -19,7 +19,7 @@ def test_approve_called_when_all_gates_pass(provider, state_db, pr, global_confi
         approve_reason='Looks good',
     )
 
-    post_review(provider, state_db, pr, result, project_config, global_config, diff_lines=20)
+    post_review(provider, state_db, pr, result, project_config, global_config, post=True, diff_lines=20)
 
     assert len(provider.approved) == 1
     assert provider.approved[0] == (pr.repo_slug, pr.pr_id)
@@ -39,7 +39,7 @@ def test_approve_blocked_by_severity(provider, state_db, pr, global_config):
         approve_reason='Should not show',
     )
 
-    post_review(provider, state_db, pr, result, project_config, global_config)
+    post_review(provider, state_db, pr, result, project_config, global_config, post=True)
 
     assert len(provider.approved) == 0
 
@@ -51,7 +51,7 @@ def test_approve_blocked_by_diff_size(provider, state_db, pr, global_config):
     )
     result = make_result(approve=True, approve_reason='Small change')
 
-    post_review(provider, state_db, pr, result, project_config, global_config, diff_lines=100)
+    post_review(provider, state_db, pr, result, project_config, global_config, post=True, diff_lines=100)
 
     assert len(provider.approved) == 0
 
@@ -67,7 +67,7 @@ def test_approve_blocked_by_finding_count(provider, state_db, pr, global_config)
         approve_reason='Minor stuff',
     )
 
-    post_review(provider, state_db, pr, result, project_config, global_config)
+    post_review(provider, state_db, pr, result, project_config, global_config, post=True)
 
     assert len(provider.approved) == 0
 
@@ -79,7 +79,7 @@ def test_approve_blocked_when_ai_says_no(provider, state_db, pr, global_config):
     )
     result = make_result(approve=False)
 
-    post_review(provider, state_db, pr, result, project_config, global_config)
+    post_review(provider, state_db, pr, result, project_config, global_config, post=True)
 
     assert len(provider.approved) == 0
 
@@ -88,7 +88,7 @@ def test_no_approve_when_disabled(provider, state_db, pr, global_config, project
     """Default config (auto_approve disabled) → never calls approve."""
     result = make_result(approve=True, approve_reason='Looks great')
 
-    post_review(provider, state_db, pr, result, project_config, global_config)
+    post_review(provider, state_db, pr, result, project_config, global_config, post=True)
 
     assert len(provider.approved) == 0
     # Rationale hidden when disabled
@@ -107,6 +107,6 @@ def test_good_findings_excluded_from_count(provider, state_db, pr, global_config
         approve_reason='Clean PR',
     )
 
-    post_review(provider, state_db, pr, result, project_config, global_config)
+    post_review(provider, state_db, pr, result, project_config, global_config, post=True)
 
     assert len(provider.approved) == 1
