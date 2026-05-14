@@ -30,3 +30,12 @@ class GitProvider(ABC):
 
     @abstractmethod
     def approve_pr(self, repo_slug: str, pr_id: int) -> bool: ...
+
+    def list_tasks(self, repo_slug: str, pr_id: int) -> list[dict]:
+        return []
+
+    def create_task(self, repo_slug: str, pr_id: int, message: str) -> int:
+        raise NotImplementedError("Tasks not supported by this provider")
+
+    def delete_task(self, repo_slug: str, pr_id: int, task_id: int) -> bool:
+        raise NotImplementedError("Tasks not supported by this provider")

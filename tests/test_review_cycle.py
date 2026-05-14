@@ -86,8 +86,11 @@ def test_skip_severities_filtered(provider, state_db, pr, global_config):
     assert 'Style nit' not in summary
 
 
-def test_dry_run_posts_nothing(provider, state_db, pr, global_config, project_config, capsys):
+def test_dry_run_posts_nothing(provider, state_db, pr, global_config, project_config, capsys, monkeypatch):
     """Dry run prints output but makes no API calls."""
+    import click
+    monkeypatch.setattr(click, 'confirm', lambda *args, **kwargs: False)
+    
     result = make_result([make_finding()])
 
     post_review(provider, state_db, pr, result, project_config, global_config, dry_run=True)

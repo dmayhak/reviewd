@@ -166,6 +166,9 @@ def _check_auto_approve_gates(
     diff_lines: int | None,
 ) -> str | None:
     """Returns a blocking reason string, or None if auto-approve should proceed."""
+    if not aa.enabled:
+        return 'Auto-approve is disabled'
+
     if aa.max_diff_lines is not None and diff_lines is not None and diff_lines > aa.max_diff_lines:
         return f'diff too large ({diff_lines} > {aa.max_diff_lines})'
 
@@ -197,6 +200,9 @@ def _resolve_auto_approve(
     blocked_reason_to_show is set only when the AI recommended approval
     but a config gate prevented it and show_blocked_reason is enabled.
     """
+    if not aa.enabled:
+        return False, None
+
     blocked = _check_auto_approve_gates(aa, result, diff_lines)
     if not blocked:
         return True, None
@@ -204,6 +210,86 @@ def _resolve_auto_approve(
     # AI wanted to approve but a gate stopped it
     show_reason = aa.show_blocked_reason and result.approve and blocked != 'AI did not approve'
     return False, blocked if show_reason else None
+
+
+def _post_review_impl(
+    provider: GitProvider,
+    state_db: StateDB,
+    pr: PRInfo,
+    result: ReviewResult,
+    project_config: ProjectConfig,
+    global_config: GlobalConfig,
+    inline_findings: list[Finding],
+    inline_ids: set[int],
+    cli: CLI = CLI.CLAUDE,
+    model: str | None = None,
+    diff_lines: int | None = None,
+):
+    logger.info('Posting review: %d inline + summary comment', len(inline_findings))
+
+    old_comment_ids = state_db.get_comment_ids(pr.repo_slug, pr.pr_id)
+    if old_comment_ids:
+        logger.info('Deleting %d old comments on PR #%d', len(old_comment_ids), pr.pr_id)
+        deleted = 0
+        for cid in old_comment_ids:
+            try:
+                provider.delete_comment(pr.repo_slug, pr.pr_id, cid)
+                state_db.remove_comment(pr.repo_slug, pr.pr_id, cid)
+                deleted += 1
+            except Exception as e:
+                from reviewd.colors import RED, RESET
+                logger.warning('Failed to delete comment %s: %s', cid, e)
+        logger.info('Deleted %d comments', deleted)
+
+    aa = project_config.auto_approve
+    approved, approve_blocked_reason = _resolve_auto_approve(aa, result, diff_lines)
+
+    summary_text = _format_summary_comment(
+        result,
+        inline_ids,
+        global_config,
+        project_config,
+        cli,
+        model=model,
+        approved=approved,
+        approve_blocked_reason=approve_blocked_reason,
+    )
+
+    posted_cids = []
+    from reviewd.colors import RED, RESET
+
+    for finding in inline_findings:
+        text = _format_inline_comment(finding)
+        try:
+            cid = provider.post_comment(
+                pr.repo_slug, pr.pr_id, text, file_path=finding.file, line=finding.line
+            )
+            if cid:
+                posted_cids.append(cid)
+        except Exception as e:
+            logger.error('%sFailed to post inline comment on %s:%s%s\n%s', RED, finding.file, finding.line, RESET, e)
+
+    try:
+        cid = provider.post_comment(pr.repo_slug, pr.pr_id, summary_text)
+        if cid:
+            posted_cids.append(cid)
+    except Exception as e:
+        logger.error('%sFailed to post summary comment%s\n%s', RED, RESET, e)
+
+    for cid in posted_cids:
+        state_db.record_comment(pr.repo_slug, pr.pr_id, cid)
+
+    # Approve
+    if approved:
+        try:
+            logger.info('Auto-approving PR #%d', pr.pr_id)
+            provider.approve_pr(pr.repo_slug, pr.pr_id)
+        except Exception as e:
+            logger.error('%sFailed to auto-approve PR%s\n%s', RED, RESET, e)
+
+    # Critical tasks (BitBucket only for now)
+    if project_config.critical_task:
+        _sync_critical_task(provider, pr, result, project_config)
 
 
 def post_review(
@@ -259,7 +345,7 @@ def post_review(
     inline_ids = {id(f) for f in inline_findings}
 
     if dry_run:
-        _print_dry_run(
+        should_post = _print_dry_run(
             result,
             inline_findings,
             inline_ids,
@@ -269,63 +355,22 @@ def post_review(
             model=model,
             diff_lines=diff_lines,
         )
-        return
+        if not should_post:
+            return
 
-    logger.info('Posting review: %d inline + summary comment', len(inline_findings))
-
-    old_comment_ids = state_db.get_comment_ids(pr.repo_slug, pr.pr_id)
-    if old_comment_ids:
-        logger.info('Deleting %d old comments on PR #%d', len(old_comment_ids), pr.pr_id)
-        deleted = 0
-        for cid in old_comment_ids:
-            if provider.delete_comment(pr.repo_slug, pr.pr_id, cid):
-                deleted += 1
-        state_db.delete_comments(pr.repo_slug, pr.pr_id)
-        logger.info('Deleted %d/%d old comments', deleted, len(old_comment_ids))
-
-    for i, finding in enumerate(inline_findings, 1):
-        logger.info('Posting inline comment %d/%d: %s:%s', i, len(inline_findings), finding.file, finding.line)
-        body = _format_inline_comment(finding)
-        try:
-            comment_id = provider.post_comment(
-                pr.repo_slug,
-                pr.pr_id,
-                body,
-                file_path=finding.file,
-                line=finding.line,
-                source_commit=pr.source_commit,
-            )
-            state_db.record_comment(pr.repo_slug, pr.pr_id, comment_id)
-        except Exception:
-            logger.exception('Failed to post inline comment on %s:%s, skipping', finding.file, finding.line)
-
-    aa = project_config.auto_approve
-    approved = False
-    approve_blocked_reason = None
-    if aa.enabled:
-        approved, approve_blocked_reason = _resolve_auto_approve(aa, result, diff_lines)
-        if not approved:
-            logger.info('Auto-approve blocked for PR #%d: %s', pr.pr_id, approve_blocked_reason or 'AI did not approve')
-
-    logger.info('Posting summary comment')
-    summary_body = _format_summary_comment(
+    _post_review_impl(
+        provider,
+        state_db,
+        pr,
         result,
-        inline_ids,
-        global_config,
         project_config,
+        global_config,
+        inline_findings,
+        inline_ids,
         cli,
         model=model,
-        approved=approved,
-        approve_blocked_reason=approve_blocked_reason,
+        diff_lines=diff_lines,
     )
-    comment_id = provider.post_comment(pr.repo_slug, pr.pr_id, summary_body)
-    state_db.record_comment(pr.repo_slug, pr.pr_id, comment_id)
-
-    if project_config.critical_task and hasattr(provider, 'list_tasks'):
-        _sync_critical_task(provider, pr, result, project_config)
-
-    if approved and provider.approve_pr(pr.repo_slug, pr.pr_id):
-        logger.info('Auto-approved PR #%d', pr.pr_id)
 
 
 def _print_dry_run(
@@ -337,7 +382,7 @@ def _print_dry_run(
     cli: CLI = CLI.CLAUDE,
     model: str | None = None,
     diff_lines: int | None = None,
-):
+) -> bool:
     print('\n' + '=' * 60)
     print('DRY RUN — would post the following comments:')
     print('=' * 60)
@@ -370,7 +415,31 @@ def _print_dry_run(
         )
     )
 
-    if aa.enabled and approved:
-        print('\n--- Auto-Approve: WOULD APPROVE ---')
+    print('\n==================== DRY RUN SUMMARY ====================')
+    if aa.enabled:
+        if approved:
+            print(f'✅ Auto-Approve: WOULD APPROVE PR')
+        else:
+            print(f'❌ Auto-Approve: BLOCKED ({approve_blocked_reason or "AI did not approve"})')
+    else:
+        print('ℹ️ Auto-Approve is disabled for this project.')
+        # In a dry run, we still have the `result.approve` output from the AI's JSON blob
+        # even if auto_approve is disabled via config.
+        if hasattr(result, 'approve') and result.approve:
+            print(f'  (The AI recommended approval, but auto-approve is turned off)')
+        else:
+            print(f'  (The AI did not recommend approval)')
+            
+    print(f'💬 Comments: Would post {len(inline_findings)} inline + 1 summary comment.')
+    print('=========================================================\n')
 
-    print('=' * 60 + '\n')
+    import click
+    from reviewd.colors import YELLOW, RESET
+
+    prompt = f'{YELLOW}Post this review?'
+    if aa.enabled and approved:
+        prompt = f'{YELLOW}This PR would be approved. Post comments and approve?'
+        
+    prompt += f'{RESET}'
+    
+    return click.confirm(prompt, default=False)

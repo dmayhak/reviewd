@@ -96,6 +96,14 @@ class StateDB:
             )
             self.conn.commit()
 
+    def remove_comment(self, repo_slug: str, pr_id: int, comment_id: int):
+        with self._lock:
+            self.conn.execute(
+                'DELETE FROM posted_comments WHERE repo_slug = ? AND pr_id = ? AND comment_id = ?',
+                (repo_slug, pr_id, comment_id),
+            )
+            self.conn.commit()
+
     def has_any_review(self, repo_slug: str, pr_id: int) -> bool:
         with self._lock:
             row = self.conn.execute(

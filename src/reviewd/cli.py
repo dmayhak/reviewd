@@ -266,19 +266,27 @@ def _interactive_select(options: list[tuple[str, str]]) -> str | None:
     has_fzf = shutil.which('fzf') is not None
 
     if has_fzf:
-        input_text = '\n'.join(display for display, _ in options)
+        # Prepend hidden index and visible row number for robust and user-friendly selection
+        input_text = '\n'.join(f'{i}\t{i+1:2}) {display}' for i, (display, _) in enumerate(options))
         try:
             result = subprocess.run(
-                ['fzf', '--prompt=Select a PR to review> '],
+                [
+                    'fzf',
+                    '--prompt=Select a PR to review> ',
+                    '--height=40%',
+                    '--layout=reverse',
+                    '--border',
+                    '--ansi',
+                    '--delimiter=\t',
+                    '--with-nth=2..',
+                ],
                 input=input_text,
                 text=True,
                 capture_output=True,
             )
             if result.returncode == 0:
-                selected_display = result.stdout.strip()
-                for display, value in options:
-                    if display == selected_display:
-                        return value
+                idx_str = result.stdout.split('\t')[0]
+                return options[int(idx_str)][1]
         except Exception:
             pass
         return None
@@ -334,32 +342,46 @@ def ls_repos(ctx, repo: str | None, verbose: bool, dry_run: bool, force: bool):
             click.echo(f'Repo "{repo_name}" not found. Available: {available}', err=True)
             raise SystemExit(1)
 
-    pr_options: list[tuple[str, str]] = []
+    pr_items: list[dict] = []
 
     try:
         for repo_config in target_repos:
             try:
                 provider = get_provider(config, repo_config)
                 prs = provider.list_open_prs(repo_config.slug)
-                if not prs:
-                    continue
                 for pr in prs:
                     reviewed = state_db.has_review(pr.repo_slug, pr.pr_id, pr.source_commit)
                     marker = '\u2713' if reviewed else '\u2022'
-
-                    # Create formatted string for display
-                    display = f'[{repo_config.name}] #{pr.pr_id} {pr.title} ({pr.author}) {marker}'
-                    # The value contains the actual repo name and PR ID separated by a space
-                    value = f'{repo_config.name} {pr.pr_id}'
-                    pr_options.append((display, value))
+                    
+                    pr_items.append({
+                        'repo': repo_config.name,
+                        'id': f'#{pr.pr_id}',
+                        'title': pr.title,
+                        'author': pr.author,
+                        'marker': marker,
+                        'value': f'{repo_config.name} {pr.pr_id}'
+                    })
             except Exception as e:
                 click.echo(f'  Error loading {repo_config.name}: {e}', err=True)
     finally:
         state_db.close()
     
-    if not pr_options:
+    if not pr_items:
         click.echo('No open PRs found.')
         return
+
+    # Calculate widths for alignment
+    max_repo = max((len(i['repo']) for i in pr_items), default=0)
+    max_id = max((len(i['id']) for i in pr_items), default=0)
+
+    pr_options = []
+    for i in pr_items:
+        # Format with aligned columns and colors: [repo] #id title (author) marker
+        repo_part = f"{CYAN}[{i['repo']:{max_repo}}]{RESET}"
+        id_part = f"{YELLOW}{i['id']:>{max_id}}{RESET}"
+        author_part = f"{DIM}({i['author']}){RESET}"
+        display = f"{repo_part} {id_part} {i['title']} {author_part} {i['marker']}"
+        pr_options.append((display, i['value']))
 
     # Prompt user to interactively select a PR
     selected_value = _interactive_select(pr_options)
