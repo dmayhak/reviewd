@@ -427,6 +427,46 @@ repos:
 """
 
 
+def init_local_repo(repo_path: str | Path) -> bool:
+    """Initialize a local .reviewd.yaml in the given repo path."""
+    repo_path = Path(repo_path).resolve()
+    cwd_root = _git_repo_root(str(repo_path))
+    if not cwd_root:
+        return False
+    
+    root_path = Path(cwd_root)
+    project_config_path = root_path / '.reviewd.yaml'
+    
+    if project_config_path.exists():
+        return True
+
+    info = _detect_remote(str(root_path))
+    repo_name = info['name'] if info else root_path.name
+    
+    click.echo()
+    if not questionary.confirm(
+        f'Create .reviewd.yaml in {click.style(repo_name, bold=True)}? (per-project settings)',
+        default=True,
+        style=STYLE,
+    ).unsafe_ask():
+        return False
+    
+    # Try to add a basic repo block if we detected a remote
+    content = PROJECT_CONFIG_TEMPLATE
+    if info:
+        repo_block = f"\n# repo:\n#   name: {info['name']}\n#   provider: {info['provider']}\n"
+        if info['provider'] == 'github':
+            repo_block += f"#   repo_slug: {info['slug']}\n"
+        elif info['provider'] == 'bitbucket':
+            repo_block += f"#   workspace: {info.get('workspace', 'YOUR_WORKSPACE')}\n"
+            repo_block += f"#   repo_slug: {info.get('slug', info['name'])}\n"
+        content += repo_block
+
+    project_config_path.write_text(content)
+    _success(f'Created {project_config_path}')
+    return True
+
+
 def run_wizard():
     try:
         _run_wizard_inner()

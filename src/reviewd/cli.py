@@ -13,7 +13,7 @@ import click
 from reviewd.colors import BOLD_RED, BOLD_WHITE, CLEAR_LINE, CYAN, DIM, GREEN, RED, RESET, YELLOW
 from reviewd.config import get_provider, load_global_config, load_project_config, load_repo_config_from_path
 from reviewd.daemon import review_single_pr, run_poll_loop
-from reviewd.models import CLI, GlobalConfig, PRInfo
+from reviewd.models import CLI, GlobalConfig, PRInfo, RepoConfig
 from reviewd.reviewer import get_base_branch, get_current_branch, get_diff_lines, review_pr
 from reviewd.state import StateDB
 
@@ -209,6 +209,14 @@ def watch(ctx, verbose: bool, dry_run: bool, post: bool, review_existing: bool, 
     config = load_global_config(ctx.obj['config_path'])
     _attach_file_logging(config.log_file)
     _apply_cli_override(config, cli)
+
+    if not config.repos:
+        # If no repos configured, try to init current folder
+        _get_repo_config(config, '.', auto_init=True)
+        # Reload config in case it was updated
+        config = load_global_config(ctx.obj['config_path'])
+        _apply_cli_override(config, cli)
+
     if concurrency is not None:
         config.max_concurrent_reviews = concurrency
     run_poll_loop(config, dry_run=dry_run, post=post, review_existing=review_existing, verbose=verbose)
@@ -234,6 +242,31 @@ def _resolve_repo(config: GlobalConfig, repo_arg: str) -> str:
     return repo_arg
 
 
+def _get_repo_config(config: GlobalConfig, repo_arg: str, auto_init: bool = False) -> RepoConfig | None:
+    """Find repo config by name/path, optionally prompting to init if missing."""
+    repo_name = _resolve_repo(config, repo_arg)
+    repo_config = next((r for r in config.repos if r.name == repo_name), None)
+    if repo_config:
+        return repo_config
+
+    # Try local .reviewd.yaml discovery
+    search_path = Path.cwd() if repo_arg == '.' else Path(repo_arg).expanduser()
+    if not search_path.is_dir():
+        return None
+
+    repo_config = load_repo_config_from_path(search_path, config.cli, config.model)
+    if repo_config:
+        return repo_config
+
+    # Not configured. Auto-init?
+    if auto_init:
+        from reviewd.wizard import init_local_repo
+        if init_local_repo(search_path):
+            return load_repo_config_from_path(search_path, config.cli, config.model)
+
+    return None
+
+
 def review_pr_cmd(ctx, repo: str, pr_id: int, verbose: bool, dry_run: bool, post: bool, force: bool, cli: str | None, interactive_prompt: bool = False):
     # Retrieve 'verbose' from the context dict instead of assigning it as an attribute
     verbose_val = ctx.obj.get('verbose', False) or verbose
@@ -242,8 +275,13 @@ def review_pr_cmd(ctx, repo: str, pr_id: int, verbose: bool, dry_run: bool, post
     config = load_global_config(ctx.obj['config_path'])
     _apply_cli_override(config, cli)
     
-    repo_name = _resolve_repo(config, repo)
-    review_single_pr(config, repo_name, pr_id=pr_id, dry_run=dry_run, post=post, force=force, interactive_prompt=interactive_prompt)
+    repo_config = _get_repo_config(config, repo, auto_init=True)
+    if not repo_config:
+        available = ', '.join(r.name for r in config.repos) or '(none)'
+        click.echo(f'Repo "{repo}" not found and could not be initialized. Available: {available}', err=True)
+        raise SystemExit(1)
+        
+    review_single_pr(config, repo_config.name, pr_id=pr_id, dry_run=dry_run, post=post, force=force, interactive_prompt=interactive_prompt)
 
 
 @main.command()
@@ -331,19 +369,17 @@ def ls_repos(ctx, repo: str | None, verbose: bool, dry_run: bool, post: bool, fo
     target_repos = config.repos
     if repo is None:
         # Default to '.' if it's a valid repo, otherwise list all configured repos
-        cwd_repo_name = _resolve_repo(config, '.')
-        cwd_repo = next((r for r in config.repos if r.name == cwd_repo_name), None)
+        cwd_repo = _get_repo_config(config, '.', auto_init=False)  # Don't auto-init on bare 'ls'
         if cwd_repo:
             target_repos = [cwd_repo]
     else:
         # Explicit repo passed
-        repo_name = _resolve_repo(config, repo)
-        explicit_repo = next((r for r in config.repos if r.name == repo_name), None)
+        explicit_repo = _get_repo_config(config, repo, auto_init=True)
         if explicit_repo:
             target_repos = [explicit_repo]
         else:
             available = ', '.join(r.name for r in config.repos) or '(none)'
-            click.echo(f'Repo "{repo_name}" not found. Available: {available}', err=True)
+            click.echo(f'Repo "{repo}" not found and could not be initialized. Available: {available}', err=True)
             raise SystemExit(1)
 
     pr_items: list[dict] = []
@@ -450,16 +486,11 @@ def scan(ctx, base_branch: str | None, verbose: bool, cli: str | None):
     _apply_cli_override(config, cli)
 
     # 1. Resolve repo
-    repo_name = _resolve_repo(config, '.')
-    repo_config = next((r for r in config.repos if r.name == repo_name), None)
+    repo_config = _get_repo_config(config, '.', auto_init=True)
     if not repo_config:
-        # If not in a configured repo, we can still try to scan it by treating CWD as a path
-        # but it might lack specific project config unless there is a .reviewd.yaml
-        repo_config = load_repo_config_from_path(Path.cwd(), config.cli, config.model)
-        if not repo_config:
-            available = ', '.join(r.name for r in config.repos) or '(none)'
-            click.echo(f'Current directory is not a configured repo. Available: {available}', err=True)
-            raise SystemExit(1)
+        available = ', '.join(r.name for r in config.repos) or '(none)'
+        click.echo(f'Current directory is not a configured repo. Available: {available}', err=True)
+        raise SystemExit(1)
 
     # 2. Get branches
     repo_path = Path(repo_config.path)
@@ -511,7 +542,7 @@ def scan(ctx, base_branch: str | None, verbose: bool, cli: str | None):
 
     diff_lines = get_diff_lines(str(repo_path), pr)
     if diff_lines == 0:
-        click.echo(f'{GREEN}No changes detected between {source_branch} and {base_branch}.{RESET}')
+        click.echo(f'{GREEN}No changes detected between {source_branch} and {base_ref}.{RESET}')
         return
 
     result = review_pr(
