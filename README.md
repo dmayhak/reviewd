@@ -48,6 +48,19 @@ Or with [`uv`](https://docs.astral.sh/uv/):
 uv tool install reviewd
 ```
 
+**Install from source (Development):**
+
+If you have cloned the repository and want to install it locally:
+
+```bash
+# Setup environment and install in editable mode
+uv sync
+uv pip install -e .
+
+# Or install as a global tool from the local folder
+uv tool install .
+```
+
 Requires Python 3.12+. You also need `claude`, `gemini`, or `codex` CLI installed and authenticated.
 
 > **Running on a headless server?** Claude CLI's interactive `/login` expires and can't re-authenticate without a browser. Generate a long-lived token instead:
