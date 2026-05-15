@@ -80,6 +80,7 @@ def _format_duration(seconds: float) -> str:
 
 
 def _format_summary_comment(
+    pr: PRInfo,
     result: ReviewResult,
     inline_ids: set[int],
     global_config: GlobalConfig,
@@ -141,7 +142,8 @@ def _format_summary_comment(
     duration_str = f' in {_format_duration(result.duration_seconds)}' if result.duration_seconds else ''
     footer = global_config.footer.replace('{duration}', duration_str).replace('{model}', model_label)
     lines.append(f'*{footer}*')
-    lines.append('*Replies to this comment are not monitored.*')
+    if not pr.is_local:
+        lines.append('*Replies to this comment are not monitored.*')
 
     return '\n'.join(lines)
 
@@ -237,7 +239,6 @@ def _post_review_impl(
                 state_db.remove_comment(pr.repo_slug, pr.pr_id, cid)
                 deleted += 1
             except Exception as e:
-                from reviewd.colors import RED, RESET
                 logger.warning('Failed to delete comment %s: %s', cid, e)
         logger.info('Deleted %d comments', deleted)
 
@@ -245,6 +246,7 @@ def _post_review_impl(
     approved, approve_blocked_reason = _resolve_auto_approve(aa, result, diff_lines)
 
     summary_text = _format_summary_comment(
+        pr,
         result,
         inline_ids,
         global_config,
@@ -262,7 +264,7 @@ def _post_review_impl(
         text = _format_inline_comment(finding)
         try:
             cid = provider.post_comment(
-                pr.repo_slug, pr.pr_id, text, file_path=finding.file, line=finding.line
+                pr.repo_slug, pr.pr_id, text, file_path=finding.file, line=finding.line, source_commit=pr.source_commit
             )
             if cid:
                 posted_cids.append(cid)
@@ -348,6 +350,7 @@ def post_review(
     if dry_run:
         # True dry-run: print only, no DB log, no prompt
         _print_dry_run(
+            pr,
             result,
             inline_findings,
             inline_ids,
@@ -379,6 +382,7 @@ def post_review(
 
     # Default: Preview + Prompt. Log to DB either way.
     should_post = _print_dry_run(
+        pr,
         result,
         inline_findings,
         inline_ids,
@@ -411,6 +415,7 @@ def post_review(
 
 
 def _print_dry_run(
+    pr: PRInfo,
     result: ReviewResult,
     inline_findings: list[Finding],
     inline_ids: set[int],
@@ -442,6 +447,7 @@ def _print_dry_run(
     print('\n--- Summary Comment ---')
     print(
         _format_summary_comment(
+            pr,
             result,
             inline_ids,
             global_config,
@@ -454,21 +460,25 @@ def _print_dry_run(
     )
 
     print('\n==================== REVIEW SUMMARY ====================')
-    if aa.enabled:
+    if pr.is_local:
+        if result.approve:
+            print(f'✅ AI Recommendation: APPROVE')
+        else:
+            print(f'❌ AI Recommendation: DO NOT APPROVE')
+    elif aa.enabled:
         if approved:
             print(f'✅ Auto-Approve: WOULD APPROVE PR')
         else:
             print(f'❌ Auto-Approve: BLOCKED ({approve_blocked_reason or "AI did not approve"})')
     else:
         print('ℹ️ Auto-Approve is disabled for this project.')
-        # In a dry run, we still have the `result.approve` output from the AI's JSON blob
-        # even if auto_approve is disabled via config.
-        if hasattr(result, 'approve') and result.approve:
+        if result.approve:
             print(f'  (The AI recommended approval, but auto-approve is turned off)')
         else:
             print(f'  (The AI did not recommend approval)')
             
-    print(f'💬 Comments: {len(inline_findings)} inline + 1 summary comment.')
+    if not pr.is_local:
+        print(f'💬 Comments: {len(inline_findings)} inline + 1 summary comment.')
     print('=========================================================\n')
 
     if skip_confirm:

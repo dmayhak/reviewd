@@ -268,6 +268,8 @@ reviewd pr <repo> <id> --post                 # review and post automatically
 reviewd pr <repo> <id> --dry-run              # review, preview only, no state change
 reviewd pr . <id>                             # one-shot review matching current path dynamically
 reviewd pr <repo> <id> --force                # re-review (bypasses already-reviewed/cooldown/skip)
+reviewd scan                                  # review local work (commits + uncommitted changes) vs default branch
+reviewd scan master                           # review local work vs specific branch
 reviewd status <repo>                         # review history
 ```
 

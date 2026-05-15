@@ -10,10 +10,11 @@ from pathlib import Path
 
 import click
 
-from reviewd.colors import BOLD_RED, CLEAR_LINE, CYAN, DIM, GREEN, RED, RESET, YELLOW
-from reviewd.config import get_provider, load_global_config
+from reviewd.colors import BOLD_RED, BOLD_WHITE, CLEAR_LINE, CYAN, DIM, GREEN, RED, RESET, YELLOW
+from reviewd.config import get_provider, load_global_config, load_project_config, load_repo_config_from_path
 from reviewd.daemon import review_single_pr, run_poll_loop
-from reviewd.models import CLI, GlobalConfig
+from reviewd.models import CLI, GlobalConfig, PRInfo
+from reviewd.reviewer import get_base_branch, get_current_branch, get_diff_lines, review_pr
 from reviewd.state import StateDB
 
 try:
@@ -326,7 +327,6 @@ def ls_repos(ctx, repo: str | None, verbose: bool, dry_run: bool, post: bool, fo
     config = load_global_config(ctx.obj['config_path'])
     state_db = StateDB(config.state_db)
 
-    # ... (rest of ls_repos) ...
     # Determine which repos to list
     target_repos = config.repos
     if repo is None:
@@ -433,5 +433,110 @@ def status(ctx, repo: str, verbose: bool, limit: int):
             if err:
                 line += f'  error: {err}'
             click.echo(line)
+    finally:
+        state_db.close()
+
+
+@main.command()
+@click.argument('base_branch', required=False)
+@click.option('-v', '--verbose', is_flag=True, help='Enable verbose logging')
+@click.option('--cli', type=click.Choice(['claude', 'gemini', 'codex']), default=None, help='Override AI CLI')
+@click.pass_context
+def scan(ctx, base_branch: str | None, verbose: bool, cli: str | None):
+    """Review local changes (including uncommitted work) against a base branch."""
+    verbose = _resolve_verbose(ctx, verbose)
+    _ensure_global_config(ctx.obj['config_path'])
+    config = load_global_config(ctx.obj['config_path'])
+    _apply_cli_override(config, cli)
+
+    # 1. Resolve repo
+    repo_name = _resolve_repo(config, '.')
+    repo_config = next((r for r in config.repos if r.name == repo_name), None)
+    if not repo_config:
+        # If not in a configured repo, we can still try to scan it by treating CWD as a path
+        # but it might lack specific project config unless there is a .reviewd.yaml
+        repo_config = load_repo_config_from_path(Path.cwd(), config.cli, config.model)
+        if not repo_config:
+            available = ', '.join(r.name for r in config.repos) or '(none)'
+            click.echo(f'Current directory is not a configured repo. Available: {available}', err=True)
+            raise SystemExit(1)
+
+    # 2. Get branches
+    repo_path = Path(repo_config.path)
+    try:
+        source_branch = get_current_branch(repo_path)
+        if base_branch is None:
+            base_branch = get_base_branch(repo_path)
+        
+        # Resolve to origin/ if possible to see what's new vs the server
+        base_ref = base_branch
+        for remote in ['origin', 'upstream']:
+            remote_ref = f'{remote}/{base_branch}'
+            res = subprocess.run(
+                ['git', 'rev-parse', '--verify', remote_ref],
+                cwd=repo_path,
+                capture_output=True,
+                timeout=5,
+            )
+            if res.returncode == 0:
+                base_ref = remote_ref
+                break
+    except RuntimeError as e:
+        click.echo(str(e), err=True)
+        raise SystemExit(1)
+
+    click.echo(f'{CYAN}Scanning: {BOLD_WHITE}{source_branch}{RESET} \u2192 {CYAN}{base_ref}{RESET}\n')
+
+    # 3. Create dummy PRInfo
+    pr = PRInfo(
+        repo_slug=repo_config.slug,
+        pr_id=0,
+        title=f'Local Scan: {source_branch}',
+        author='local',
+        source_branch=source_branch,
+        destination_branch=base_ref,
+        source_commit='HEAD',
+        url='',
+        is_local=True,
+    )
+
+    # 4. Run review
+    project_config = load_project_config(repo_path, config)
+
+    # Use repo_config.cli if not overridden
+    active_cli = repo_config.cli
+    active_model = repo_config.model or config.model
+
+    from reviewd.commenter import post_review
+
+    diff_lines = get_diff_lines(str(repo_path), pr)
+    if diff_lines == 0:
+        click.echo(f'{GREEN}No changes detected between {source_branch} and {base_branch}.{RESET}')
+        return
+
+    result = review_pr(
+        str(repo_path),
+        pr,
+        project_config,
+        cli=active_cli,
+        model=active_model,
+        cli_args=config.cli_args,
+        cli_defaults=config.cli_defaults,
+    )
+
+    state_db = StateDB(config.state_db)
+    try:
+        post_review(
+            None,  # type: ignore # provider
+            state_db,
+            pr,
+            result,
+            project_config,
+            config,
+            cli=active_cli,
+            model=active_model,
+            dry_run=True,  # scan is always dry-run for now
+            diff_lines=diff_lines,
+        )
     finally:
         state_db.close()
