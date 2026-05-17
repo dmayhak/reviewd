@@ -8,6 +8,17 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Python's default stdout encoding on Windows follows the legacy ANSI code page
+# (usually cp1252), which cannot encode the Unicode glyphs (→, spinner frames,
+# bullets, etc.) used throughout the UI. Reconfigure to UTF-8 with replacement
+# so output never crashes on terminals that don't have a UTF-8 console.
+if sys.platform == 'win32':
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding='utf-8', errors='replace')  # type: ignore[attr-defined]
+        except (AttributeError, OSError):
+            pass
+
 import click
 
 from reviewd.colors import BOLD_RED, BOLD_WHITE, CLEAR_LINE, CYAN, DIM, GREEN, RED, RESET, YELLOW
@@ -132,7 +143,7 @@ def _check_for_updates():
         if UPDATE_CHECK_CACHE.exists():
             stat = UPDATE_CHECK_CACHE.stat()
             if now - stat.st_mtime < UPDATE_CHECK_INTERVAL:
-                latest = UPDATE_CHECK_CACHE.read_text().strip()
+                latest = UPDATE_CHECK_CACHE.read_text(encoding='utf-8').strip()
 
         if latest is None:
             import httpx
@@ -140,7 +151,7 @@ def _check_for_updates():
             resp = httpx.get('https://pypi.org/pypi/reviewd/json', timeout=2)
             latest = resp.json()['info']['version']
             UPDATE_CHECK_CACHE.parent.mkdir(parents=True, exist_ok=True)
-            UPDATE_CHECK_CACHE.write_text(latest)
+            UPDATE_CHECK_CACHE.write_text(latest, encoding='utf-8')
 
         installed = tuple(int(x) for x in VERSION.split('.'))
         remote = tuple(int(x) for x in latest.split('.'))
@@ -180,7 +191,7 @@ def init(ctx, sample: bool, verbose: bool):
 
     if sample:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        CONFIG_PATH.write_text(SAMPLE_CONFIG)
+        CONFIG_PATH.write_text(SAMPLE_CONFIG, encoding='utf-8')
         click.echo(f'Created sample config at {CONFIG_PATH}')
         click.echo('Edit it to add your tokens and repos.')
         return

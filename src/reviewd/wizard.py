@@ -462,7 +462,7 @@ def init_local_repo(repo_path: str | Path) -> bool:
             repo_block += f"#   repo_slug: {info.get('slug', info['name'])}\n"
         content += repo_block
 
-    project_config_path.write_text(content)
+    project_config_path.write_text(content, encoding='utf-8')
     _success(f'Created {project_config_path}')
     return True
 
@@ -492,7 +492,7 @@ def _run_wizard_inner():
 
     if setup_mode == 'sample':
         config_dir.mkdir(parents=True, exist_ok=True)
-        config_path.write_text(SAMPLE_CONFIG)
+        config_path.write_text(SAMPLE_CONFIG, encoding='utf-8')
         click.echo()
         _success(f'Created {config_path}')
         click.echo()
@@ -625,7 +625,7 @@ def _run_wizard_inner():
 
     config_yaml = _build_global_config_yaml(selected_repos, github_token, bitbucket_creds, cli)
     config_dir.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(config_yaml)
+    config_path.write_text(config_yaml, encoding='utf-8')
     _success(f'Created {config_path}')
 
     # Project configs
@@ -647,7 +647,7 @@ def _run_wizard_inner():
         if create_project:
             for repo in missing:
                 project_path = Path(repo['path']) / '.reviewd.yaml'
-                project_path.write_text(PROJECT_CONFIG_TEMPLATE)
+                project_path.write_text(PROJECT_CONFIG_TEMPLATE, encoding='utf-8')
                 _success(f'Created {repo["name"]}/.reviewd.yaml')
 
     # 6. Done

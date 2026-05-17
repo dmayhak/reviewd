@@ -6,9 +6,13 @@ import logging
 import os
 import signal
 import sys
-import termios
 import threading
 import time
+
+try:
+    import termios  # POSIX-only; missing on Windows
+except ImportError:
+    termios = None  # type: ignore[assignment]
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -64,20 +68,57 @@ def _get_pid_lock_path(state_db_path: str) -> Path:
     return Path(state_db_path).parent / 'reviewd.pid'
 
 
+def _pid_alive(pid: int) -> bool:
+    """Cross-platform PID liveness probe.
+
+    On POSIX, `os.kill(pid, 0)` is the standard non-destructive check.
+    On Windows, `os.kill` calls TerminateProcess for any non-CTRL signal, so we
+    must use the Win32 API directly (OpenProcess + GetExitCodeProcess).
+    """
+    if sys.platform == 'win32':
+        import ctypes
+
+        SYNCHRONIZE = 0x00100000
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        WAIT_OBJECT_0 = 0
+        kernel32 = ctypes.windll.kernel32
+        # WaitForSingleObject(handle, 0) — returns WAIT_OBJECT_0 if the process
+        # has been signaled (exited), WAIT_TIMEOUT (0x102) otherwise. This is
+        # more reliable than GetExitCodeProcess+STILL_ACTIVE(259), which can't
+        # distinguish a live process from one that legitimately exited with 259.
+        handle = kernel32.OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, False, pid
+        )
+        if not handle:
+            return False
+        try:
+            return kernel32.WaitForSingleObject(handle, 0) != WAIT_OBJECT_0
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
 def _acquire_pid_lock(lock_path: Path):
     if lock_path.exists():
         try:
-            old_pid = int(lock_path.read_text().strip())
-            os.kill(old_pid, 0)
-            logger.error('Another watch process is already running (pid %d)', old_pid)
-            raise SystemExit(1)
-        except (ValueError, ProcessLookupError):
+            old_pid = int(lock_path.read_text(encoding='utf-8').strip())
+        except ValueError:
+            logger.info('Removing stale pid lock (invalid pid)')
+        else:
+            if _pid_alive(old_pid):
+                logger.error('Another watch process is already running (pid %d)', old_pid)
+                raise SystemExit(1)
             logger.info('Removing stale pid lock (pid gone)')
-        except PermissionError:
-            logger.error('Another watch process is already running (pid lock exists)')
-            raise SystemExit(1) from None
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path.write_text(str(os.getpid()))
+    lock_path.write_text(str(os.getpid()), encoding='utf-8')
 
 
 def _release_pid_lock(lock_path: Path):
@@ -381,10 +422,12 @@ def run_poll_loop(
 
     logger.info('Polling every %ds, max %d concurrent reviews (dry_run=%s, post=%s)', poll_interval, max_workers, dry_run, post)
 
-    # Save terminal settings so we can restore after subprocesses corrupt them
+    # Save terminal settings so we can restore after subprocesses corrupt them.
+    # termios is POSIX-only; on Windows we simply skip terminal state save/restore.
     _saved_termios = None
-    with contextlib.suppress(termios.error, ValueError, OSError):
-        _saved_termios = termios.tcgetattr(sys.stdin.fileno())
+    if termios is not None:
+        with contextlib.suppress(termios.error, ValueError, OSError):
+            _saved_termios = termios.tcgetattr(sys.stdin.fileno())
 
     executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='review')
     fetch_pool = ThreadPoolExecutor(max_workers=_MAX_FETCH_WORKERS, thread_name_prefix='fetch')
