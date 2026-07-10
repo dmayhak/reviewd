@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import os
 import re
 import subprocess
@@ -10,10 +11,10 @@ import httpx
 import questionary
 from questionary import Style
 
-REMOTE_PATTERNS = [
-    (r'github\.com[:/](?P<slug>[^/\s]+/[^/\s]+)', 'github'),
-    (r'bitbucket\.org[:/](?P<slug>[^/\s]+/[^/\s]+)', 'bitbucket'),
-]
+KNOWN_PROVIDER_HOSTS = {
+    'github.com': 'github',
+    'bitbucket.org': 'bitbucket',
+}
 
 STYLE = Style(
     [
@@ -46,6 +47,44 @@ def _info(msg: str):
     click.echo(click.style(f'  {msg}', dim=True))
 
 
+def _resolve_ssh_host(host: str) -> str:
+    """Resolve a Host alias in ~/.ssh/config (e.g. a personal shorthand for bitbucket.org) to its real HostName."""
+    config_path = Path.home() / '.ssh' / 'config'
+    if not config_path.exists():
+        return host
+
+    try:
+        lines = config_path.read_text().splitlines()
+    except OSError:
+        return host
+
+    matched = False
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith('#'):
+            continue
+        parts = stripped.split(None, 1)
+        if len(parts) != 2:
+            continue
+        key, value = parts[0].lower(), parts[1].strip()
+        if key == 'host':
+            matched = any(fnmatch.fnmatch(host, pattern) for pattern in value.split())
+        elif key == 'hostname' and matched:
+            return value
+    return host
+
+
+def _split_remote_url(url: str) -> tuple[str, str] | None:
+    """Split a git remote URL into (host, owner/repo path), handling scp-like, ssh://, and http(s):// forms."""
+    match = re.match(r'^[\w+.-]+://(?:[^@/]+@)?(?P<host>[^/:]+)(?::\d+)?/(?P<path>.+)$', url)
+    if match:
+        return match.group('host'), match.group('path')
+    match = re.match(r'^(?:[\w.-]+@)?(?P<host>[^:/@]+):(?P<path>.+)$', url)
+    if match:
+        return match.group('host'), match.group('path')
+    return None
+
+
 def _detect_remote(repo_path: str) -> dict | None:
     result = subprocess.run(
         ['git', 'remote', 'get-url', 'origin'],
@@ -57,24 +96,28 @@ def _detect_remote(repo_path: str) -> dict | None:
         return None
 
     url = result.stdout.strip().removesuffix('.git')
-    for pattern, provider in REMOTE_PATTERNS:
-        match = re.search(pattern, url)
-        if match:
-            slug = match.group('slug')
-            parts = slug.split('/')
-            info = {
-                'provider': provider,
-                'name': Path(repo_path).resolve().name,
-                'path': str(Path(repo_path).resolve()),
-                'remote_url': url,
-            }
-            if provider == 'github':
-                info['slug'] = slug
-            elif provider == 'bitbucket':
-                info['workspace'] = parts[0]
-                info['slug'] = parts[-1]
-            return info
-    return None
+    split = _split_remote_url(url)
+    if not split:
+        return None
+
+    host, slug = split
+    provider = KNOWN_PROVIDER_HOSTS.get(_resolve_ssh_host(host))
+    if not provider:
+        return None
+
+    parts = slug.split('/')
+    info = {
+        'provider': provider,
+        'name': Path(repo_path).resolve().name,
+        'path': str(Path(repo_path).resolve()),
+        'remote_url': url,
+    }
+    if provider == 'github':
+        info['slug'] = slug
+    elif provider == 'bitbucket':
+        info['workspace'] = parts[0]
+        info['slug'] = parts[-1]
+    return info
 
 
 def _git_repo_root(path: str) -> str | None:
