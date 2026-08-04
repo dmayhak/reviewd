@@ -8,6 +8,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -38,6 +39,20 @@ _active_procs_lock = threading.Lock()
 def terminate_all():
     with _active_procs_lock:
         procs = list(_active_procs)
+    if sys.platform == 'win32':
+        # Windows has no process groups / SIGKILL. Use taskkill /T to walk the
+        # process tree and /F to force-terminate (rough equivalent of SIGKILL).
+        for proc in procs:
+            with contextlib.suppress(OSError, subprocess.SubprocessError):
+                subprocess.run(
+                    ['taskkill', '/T', '/F', '/PID', str(proc.pid)],
+                    capture_output=True,
+                    timeout=10,
+                )
+        for proc in procs:
+            with contextlib.suppress(subprocess.TimeoutExpired, OSError):
+                proc.wait(timeout=3)
+        return
     for proc in procs:
         with contextlib.suppress(OSError):
             # Kill entire process group (subprocess is session leader)
@@ -288,7 +303,7 @@ def _build_cli_command(
     cli_defaults: dict[CLI, list[str]] | None = None,
 ) -> tuple[list[str], str | None]:
     """Returns (command, stdin_input). stdin_input is None when prompt is passed via flag."""
-    prompt_text = Path(prompt_file).read_text()
+    prompt_text = Path(prompt_file).read_text(encoding='utf-8')
     extra = extra_args or []
     model_args = ['--model', model] if model else []
 
@@ -300,6 +315,13 @@ def _build_cli_command(
         raise ValueError(f'Unknown AI CLI: {cli}')
 
     prompt_mode = _CLI_PROMPT_MODE[cli]
+    # On Windows, Claude is commonly installed as a batch shim (.cmd) generated
+    # by npm. These shims forward args via `%*`, which mangles long prompts
+    # containing newlines, code fences, JSON, or shell metacharacters. Piping
+    # the prompt via stdin keeps argv short and shell-safe — claude reads stdin
+    # automatically when --print is set without an inline -p prompt.
+    if sys.platform == 'win32' and cli == CLI.CLAUDE:
+        return [*base, *model_args, *extra], prompt_text
     if prompt_mode == 'stdin':
         return [*base, *model_args, *extra, '-'], prompt_text
     return [*base, *model_args, *extra, '-p', prompt_text], None
@@ -314,7 +336,7 @@ def invoke_cli(
     cli_args: list[str] | None = None,
     cli_defaults: dict[CLI, list[str]] | None = None,
 ) -> str:
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as f:
         f.write(prompt)
         prompt_file = f.name
 
@@ -326,10 +348,10 @@ def invoke_cli(
         )
 
         if cli == CLI.CODEX:
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as sf:
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding='utf-8') as sf:
                 schema_file = sf.name
-            Path(schema_file).write_text(json.dumps(REVIEW_SCHEMA))
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as of:
+            Path(schema_file).write_text(json.dumps(REVIEW_SCHEMA), encoding='utf-8')
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as of:
                 output_file = of.name
             cmd = [*cmd[:-1], '--output-schema', schema_file, '-o', output_file, cmd[-1]]
 
@@ -341,6 +363,14 @@ def invoke_cli(
         logger.debug('Prompt:\n%s', prompt)
         env = {**os.environ}
         env.pop('CLAUDECODE', None)
+        # On Windows, subprocess.Popen does not consult PATHEXT, so a bare name
+        # like 'claude' won't resolve to a 'claude.cmd' or 'claude.bat' shim.
+        # shutil.which() does consult PATHEXT — resolve once here to a full path
+        # so the npm/pip script wrappers many AI CLIs ship as on Windows work.
+        if sys.platform == 'win32' and cmd and not os.path.isabs(cmd[0]):
+            resolved = shutil.which(cmd[0])
+            if resolved:
+                cmd = [resolved, *cmd[1:]]
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -349,6 +379,8 @@ def invoke_cli(
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding='utf-8',
+                errors='replace',
                 env=env,
                 start_new_session=True,
             )
@@ -398,7 +430,7 @@ def invoke_cli(
             raise RuntimeError(f'{cli.value} exited with code {proc.returncode}: {stderr}')
 
         if output_file and Path(output_file).exists():
-            result = Path(output_file).read_text()
+            result = Path(output_file).read_text(encoding='utf-8')
             if result.strip():
                 logger.info('Read output from -o file (%d chars)', len(result))
                 return result
@@ -460,7 +492,7 @@ def extract_json(output: str) -> dict:
             # rather than throwing away the entire (paid-for) call.
             dump_path = Path(tempfile.gettempdir()) / f'reviewd-failed-{int(time.time())}.txt'
             try:
-                dump_path.write_text(output)
+                dump_path.write_text(output, encoding='utf-8')
                 logger.error('Malformed JSON in AI output: %s. Full output saved to %s', e, dump_path)
             except OSError:
                 logger.error('Malformed JSON in AI output: %s\nRaw JSON:\n%s', e, raw[:1000])
